@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "FishBite",
+    "slug": "fishbite",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "fishbite",
+    "plugins": ["expo-router", ["expo-location", {"locationAlwaysAndWhenInUsePermission":"Allow FishBite to use your location to show fishing forecasts near you."}]],
+    "ios": {"supportsTablet": true},
+    "android": {"adaptiveIcon": {"backgroundColor":"#ffffff"}}
+  }
+}
