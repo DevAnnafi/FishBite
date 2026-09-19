@@ -14,10 +14,23 @@ import {
   View,
 } from "react-native";
 import * as Location from "expo-location";
-import { getForecast, getNearbySpots, getSessions, createSession, deleteSession } from "../lib/api";
+import MapView, { Marker, UrlTile, PROVIDER_DEFAULT } from "react-native-maps";
+import {
+  getForecast,
+  getNearbySpots,
+  getSessions,
+  createSession,
+  deleteSession,
+  searchLocations,
+  getRecommendedSpot,
+  getWaypoints,
+  createWaypoint,
+  deleteWaypoint,
+} from "../lib/api";
 import { SPECIES, SPECIES_CATEGORIES, searchSpecies, Species } from "../data/species";
+import { getSpeciesTip } from "../data/speciesTips";
 
-type Tab = "Home" | "Spots" | "Fish" | "Log" | "History";
+type Tab = "Home" | "Spots" | "Map" | "Fish" | "Log" | "History";
 
 const COLORS = {
   ink: "#10251f",
@@ -42,6 +55,23 @@ function openDirections(lat: number, lon: number) {
   Linking.openURL(url);
 }
 
+// Defined at module scope (not inside Index) so these keep a stable
+// component identity across renders. If they were declared inside Index,
+// every re-render (e.g. every keystroke) would create brand-new function
+// references, React would treat them as new component types, and any
+// TextInput nested under them would unmount/remount and lose focus.
+const Header = ({ title, subtitle }: { title: string; subtitle?: string }) => (
+  <View style={styles.header}>
+    <Text style={styles.brand}>FishBite</Text>
+    <Text style={styles.title}>{title}</Text>
+    {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
+  </View>
+);
+
+const Card = ({ children }: { children: React.ReactNode }) => (
+  <View style={styles.card}>{children}</View>
+);
+
 export default function Index() {
   const [tab, setTab] = useState<Tab>("Home");
   const [species, setSpecies] = useState<Species>(
@@ -57,6 +87,10 @@ export default function Index() {
   const [spotQuery, setSpotQuery] = useState("");
   const [loadingSpots, setLoadingSpots] = useState(false);
   const [spotError, setSpotError] = useState("");
+  const [placeQuery, setPlaceQuery] = useState("");
+  const [placeResults, setPlaceResults] = useState<any[]>([]);
+  const [searchingPlace, setSearchingPlace] = useState(false);
+  const [customPlace, setCustomPlace] = useState<{ lat: number; lon: number; label: string } | null>(null);
 
   const [fishQuery, setFishQuery] = useState("");
   const [fishCategory, setFishCategory] = useState("All");
@@ -70,6 +104,20 @@ export default function Index() {
   const [logCaught, setLogCaught] = useState("0");
   const [logNotes, setLogNotes] = useState("");
   const [savingLog, setSavingLog] = useState(false);
+
+  const [recommended, setRecommended] = useState<any>(null);
+  const [loadingRecommended, setLoadingRecommended] = useState(false);
+  const [recommendedError, setRecommendedError] = useState("");
+
+  const [spotsView, setSpotsView] = useState<"public" | "mine">("public");
+  const [waypoints, setWaypoints] = useState<any[]>([]);
+  const [loadingWaypoints, setLoadingWaypoints] = useState(false);
+  const [addingWaypoint, setAddingWaypoint] = useState(false);
+  const [newWaypointLabel, setNewWaypointLabel] = useState("");
+  const [newWaypointNotes, setNewWaypointNotes] = useState("");
+  const [savingWaypoint, setSavingWaypoint] = useState(false);
+
+  const [showDepthChart, setShowDepthChart] = useState(true);
 
   async function locate() {
     setLocationError("");
@@ -97,7 +145,8 @@ export default function Index() {
         current.coords.latitude,
         current.coords.longitude,
         species.name,
-        today()
+        today(),
+        species.categories
       );
       setForecast(data);
     } catch (e: any) {
@@ -107,7 +156,100 @@ export default function Index() {
     }
   }
 
-  async function loadSpots(current = location, radius = spotRadius) {
+  async function loadRecommended(current = location) {
+    if (!current) {
+      const found = await locate();
+      if (!found) return;
+      current = found;
+    }
+    setLoadingRecommended(true);
+    setRecommendedError("");
+    try {
+      const data = await getRecommendedSpot(
+        current.coords.latitude,
+        current.coords.longitude,
+        species.name,
+        species.categories
+      );
+      setRecommended(data);
+    } catch (e: any) {
+      setRecommendedError(e?.message || "Could not rank nearby spots right now.");
+      setRecommended(null);
+    } finally {
+      setLoadingRecommended(false);
+    }
+  }
+
+  // Resolves to the typed-in place when one has been chosen on the Spots
+  // screen, falling back to GPS location otherwise. Shaped as a real
+  // Location.LocationObject so it's a drop-in replacement for `location`
+  // anywhere loadSpots/loadForecast expect one.
+  function spotsOrigin(): Location.LocationObject | null {
+    if (customPlace) {
+      return {
+        coords: {
+          latitude: customPlace.lat,
+          longitude: customPlace.lon,
+          altitude: null,
+          accuracy: null,
+          altitudeAccuracy: null,
+          heading: null,
+          speed: null,
+        },
+        timestamp: Date.now(),
+      };
+    }
+    return location;
+  }
+
+  async function searchPlace() {
+    const q = placeQuery.trim();
+    if (!q) return;
+    setSearchingPlace(true);
+    setPlaceResults([]);
+    try {
+      const data = await searchLocations(q);
+      const results = data.results || [];
+      setPlaceResults(results);
+      if (results.length === 0) {
+        Alert.alert("No matches", `Couldn't find "${q}". Try a city, neighborhood, or zip code.`);
+      }
+    } catch (e: any) {
+      Alert.alert("Search failed", e?.message || "Try again.");
+    } finally {
+      setSearchingPlace(false);
+    }
+  }
+
+  function choosePlace(result: any) {
+    setCustomPlace({ lat: result.lat, lon: result.lon, label: result.label });
+    setPlaceResults([]);
+    setPlaceQuery(result.label);
+    loadSpots(
+      {
+        coords: {
+          latitude: result.lat,
+          longitude: result.lon,
+          altitude: null,
+          accuracy: null,
+          altitudeAccuracy: null,
+          heading: null,
+          speed: null,
+        },
+        timestamp: Date.now(),
+      },
+      spotRadius
+    );
+  }
+
+  function useMyLocation() {
+    setCustomPlace(null);
+    setPlaceQuery("");
+    setPlaceResults([]);
+    loadSpots(location, spotRadius);
+  }
+
+  async function loadSpots(current = spotsOrigin(), radius = spotRadius) {
     if (!current) {
       const found = await locate();
       if (!found) return;
@@ -141,18 +283,103 @@ export default function Index() {
     }
   }
 
+  async function loadWaypoints() {
+    setLoadingWaypoints(true);
+    try {
+      const data = await getWaypoints();
+      setWaypoints(data.waypoints || []);
+    } catch (e: any) {
+      Alert.alert("Waypoints unavailable", e?.message || "Try again.");
+    } finally {
+      setLoadingWaypoints(false);
+    }
+  }
+
+  async function addWaypoint() {
+    const label = newWaypointLabel.trim();
+    if (!label) {
+      Alert.alert("Name required", "Give this waypoint a name.");
+      return;
+    }
+    const origin = spotsOrigin();
+    if (!origin) {
+      Alert.alert("Location needed", "Turn on GPS or search a location first.");
+      return;
+    }
+    setSavingWaypoint(true);
+    try {
+      await createWaypoint({
+        label,
+        lat: origin.coords.latitude,
+        lon: origin.coords.longitude,
+        notes: newWaypointNotes.trim() || null,
+      });
+      setNewWaypointLabel("");
+      setNewWaypointNotes("");
+      setAddingWaypoint(false);
+      await loadWaypoints();
+    } catch (e: any) {
+      Alert.alert("Could not save waypoint", e?.message || "Try again.");
+    } finally {
+      setSavingWaypoint(false);
+    }
+  }
+
+  async function saveSpotAsWaypoint(spot: any) {
+    try {
+      await createWaypoint({
+        label: spot.name,
+        lat: spot.lat,
+        lon: spot.lon,
+        notes: spot.facility ? `Saved from public spots: ${spot.facility}` : "Saved from public spots",
+      });
+      Alert.alert("Saved", `${spot.name} added to My Waypoints.`);
+      loadWaypoints();
+    } catch (e: any) {
+      Alert.alert("Could not save waypoint", e?.message || "Try again.");
+    }
+  }
+
+  function removeWaypoint(waypoint: any) {
+    Alert.alert(
+      "Delete waypoint?",
+      `Remove "${waypoint.label}" from My Waypoints.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await deleteWaypoint(waypoint.id);
+              setWaypoints((old) => old.filter((w) => w.id !== waypoint.id));
+            } catch (e: any) {
+              Alert.alert("Delete failed", e?.message || "Try again.");
+            }
+          },
+        },
+      ]
+    );
+  }
+
   useEffect(() => {
     locate().catch(() => {});
     loadHistory();
+    loadWaypoints();
   }, []);
 
   useEffect(() => {
-    if (tab === "Spots") loadSpots();
+    if (tab === "Spots") {
+      loadSpots();
+      loadWaypoints();
+    }
     if (tab === "History") loadHistory();
   }, [tab]);
 
   useEffect(() => {
     setLogSpecies(species.name);
+    loadForecast();
+    loadRecommended();
   }, [species]);
 
   const filteredSpecies = useMemo(
@@ -230,22 +457,63 @@ export default function Index() {
     );
   }
 
-  const Header = ({ title, subtitle }: { title: string; subtitle?: string }) => (
-    <View style={styles.header}>
-      <Text style={styles.brand}>FishBite</Text>
-      <Text style={styles.title}>{title}</Text>
-      {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-    </View>
-  );
-
-  const Card = ({ children }: { children: React.ReactNode }) => (
-    <View style={styles.card}>{children}</View>
-  );
-
   function Home() {
+    const tip = getSpeciesTip(species);
+
     return (
       <ScrollView contentContainerStyle={styles.scroll}>
         <Header title="What should we fish for?" subtitle="Current conditions → bite activity" />
+
+        <Card>
+          <View style={styles.rowBetween}>
+            <View style={styles.proBadgeRow}>
+              <Text style={styles.proBadge}>PRO</Text>
+              <Text style={styles.sectionTitle}>Today's Pick</Text>
+            </View>
+            <Pressable style={styles.smallButton} onPress={() => loadRecommended()}>
+              <Text style={styles.smallButtonText}>Refresh</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.muted}>Best nearby spot right now, and how to fish {species.name} today - free, no subscription.</Text>
+
+          {loadingRecommended ? (
+            <ActivityIndicator size="large" color={COLORS.green} style={{ margin: 30 }} />
+          ) : recommendedError ? (
+            <Text style={styles.error}>{recommendedError}</Text>
+          ) : recommended?.recommended ? (
+            <>
+              <View style={styles.bestWindow}>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.bestWindowLabel}>RECOMMENDED SPOT · {recommended.current_time_label}</Text>
+                  <Text style={styles.bestWindowValue}>{recommended.recommended.current_score}</Text>
+                </View>
+                <Text style={styles.spotName}>{recommended.recommended.name}</Text>
+                <Text style={styles.muted}>{recommended.recommended.distance_miles} mi away · {recommended.recommended.tide}</Text>
+                <Text style={styles.muted}>Best window: {recommended.recommended.best_start} – {recommended.recommended.best_end}</Text>
+                <Pressable
+                  style={[styles.primaryMini, { alignSelf: "flex-start", marginTop: 10 }]}
+                  onPress={() => openDirections(recommended.recommended.lat, recommended.recommended.lon)}
+                >
+                  <Text style={styles.primaryMiniText}>Directions</Text>
+                </Pressable>
+              </View>
+              {recommended.alternatives?.length ? (
+                <Text style={styles.muted}>
+                  Also nearby: {recommended.alternatives.slice(0, 2).map((a: any) => `${a.name} (${a.current_score})`).join(", ")}
+                </Text>
+              ) : null}
+            </>
+          ) : (
+            <Text style={styles.muted}>Tap Refresh to rank nearby spots for right now.</Text>
+          )}
+
+          <View style={styles.tipBox}>
+            <Text style={styles.label}>Bait & technique for {species.name}</Text>
+            <Text style={styles.detail}>🪱 {tip.bait}</Text>
+            <Text style={styles.detail}>🎣 {tip.technique}</Text>
+          </View>
+        </Card>
+
         <Card>
           <Text style={styles.label}>Target species</Text>
           <Pressable style={styles.selector} onPress={() => setTab("Fish")}>
@@ -313,7 +581,7 @@ export default function Index() {
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {forecast.hours.map((hour: any, i: number) => (
                 <View key={i} style={styles.hourCard}>
-                  <Text style={styles.hourTime}>{hour.time || hour.label || ""}</Text>
+                  <Text style={styles.hourTime}>{hour.time_label || hour.label || hour.time || ""}</Text>
                   <Text style={styles.hourScore}>{hour.score ?? hour.activity ?? "—"}</Text>
                 </View>
               ))}
@@ -332,10 +600,109 @@ export default function Index() {
     return (
       <View style={styles.flex}>
         <ScrollView contentContainerStyle={styles.scroll}>
-          <Header title="Fishing Spots" subtitle="Real access points from NYSDEC data" />
+          <Header title="Fishing Spots" subtitle="Real access points from NYSDEC + NYC Waterfront data" />
+
+          <View style={styles.segmentRow}>
+            <Pressable style={[styles.segment, spotsView === "public" && styles.segmentActive]} onPress={() => setSpotsView("public")}>
+              <Text style={spotsView === "public" ? styles.segmentTextActive : styles.segmentText}>Public Spots</Text>
+            </Pressable>
+            <Pressable style={[styles.segment, spotsView === "mine" && styles.segmentActive]} onPress={() => setSpotsView("mine")}>
+              <Text style={spotsView === "mine" ? styles.segmentTextActive : styles.segmentText}>My Waypoints ({waypoints.length})</Text>
+            </Pressable>
+          </View>
+
+          {spotsView === "mine" ? (
+            <>
+              <Card>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.sectionTitle}>My Waypoints</Text>
+                  <Pressable style={styles.smallButton} onPress={() => setAddingWaypoint((v) => !v)}>
+                    <Text style={styles.smallButtonText}>{addingWaypoint ? "Cancel" : "+ Add"}</Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.muted}>Private spots only you can see - unlimited, and free.</Text>
+
+                {addingWaypoint ? (
+                  <View style={{ marginTop: 10 }}>
+                    <TextInput value={newWaypointLabel} onChangeText={setNewWaypointLabel} placeholder="Name this spot" style={styles.input} />
+                    <TextInput value={newWaypointNotes} onChangeText={setNewWaypointNotes} placeholder="Notes (optional)" style={styles.input} />
+                    <Text style={styles.muted}>Uses your current location{customPlace ? ` (${customPlace.label})` : ""}.</Text>
+                    <Pressable style={styles.primaryButton} onPress={addWaypoint} disabled={savingWaypoint}>
+                      {savingWaypoint ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Save Waypoint</Text>}
+                    </Pressable>
+                  </View>
+                ) : null}
+              </Card>
+
+              {loadingWaypoints ? (
+                <ActivityIndicator size="large" color={COLORS.green} style={{ margin: 30 }} />
+              ) : waypoints.length === 0 ? (
+                <Card>
+                  <Text style={styles.sectionTitle}>No waypoints yet</Text>
+                  <Text style={styles.muted}>Save your own favorite spots here, or tap "Save" on any public spot.</Text>
+                </Card>
+              ) : (
+                waypoints.map((w) => (
+                  <Card key={w.id}>
+                    <View style={styles.rowBetween}>
+                      <View style={{ flex: 1, paddingRight: 10 }}>
+                        <Text style={styles.spotName}>{w.label}</Text>
+                        {w.notes ? <Text style={styles.muted}>{w.notes}</Text> : null}
+                      </View>
+                      <Pressable style={styles.primaryMini} onPress={() => openDirections(w.lat, w.lon)}>
+                        <Text style={styles.primaryMiniText}>Directions</Text>
+                      </Pressable>
+                    </View>
+                    <Pressable onPress={() => removeWaypoint(w)}>
+                      <Text style={[styles.link, { color: COLORS.danger, marginTop: 10 }]}>Delete</Text>
+                    </Pressable>
+                  </Card>
+                ))
+              )}
+            </>
+          ) : (
+          <>
+          <Card>
+            <Text style={styles.sectionTitle}>Search a location</Text>
+            <Text style={styles.muted}>Type a town, neighborhood, or zip code to find spots there instead of near you.</Text>
+            <TextInput
+              value={placeQuery}
+              onChangeText={setPlaceQuery}
+              onSubmitEditing={searchPlace}
+              placeholder="e.g. Sheepshead Bay, or 11101"
+              returnKeyType="search"
+              style={styles.input}
+            />
+            <Pressable style={styles.primaryButton} onPress={searchPlace} disabled={searchingPlace}>
+              {searchingPlace ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Search</Text>}
+            </Pressable>
+
+            {placeResults.length > 0 ? (
+              <View style={{ marginTop: 10 }}>
+                {placeResults.map((result, i) => (
+                  <Pressable key={i} style={styles.selector} onPress={() => choosePlace(result)}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.selectorTitle}>{result.label}</Text>
+                    </View>
+                    <Text style={styles.link}>Use this</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+
+            {customPlace ? (
+              <View style={[styles.rowBetween, { marginTop: 10 }]}>
+                <Text style={styles.muted}>Showing spots near {customPlace.label}</Text>
+                <Pressable onPress={useMyLocation}>
+                  <Text style={styles.link}>Use my location</Text>
+                </Pressable>
+              </View>
+            ) : null}
+          </Card>
+
           <Card>
             <View style={styles.rowBetween}>
-              <Text style={styles.sectionTitle}>Near me</Text>
+              <Text style={styles.sectionTitle}>Nearby</Text>
               <Pressable style={styles.smallButton} onPress={() => loadSpots()}>
                 <Text style={styles.smallButtonText}>Refresh</Text>
               </Pressable>
@@ -353,7 +720,7 @@ export default function Index() {
                   style={[styles.chip, spotRadius === r && styles.chipActive]}
                   onPress={() => {
                     setSpotRadius(r);
-                    loadSpots(location, r);
+                    loadSpots(spotsOrigin(), r);
                   }}
                 >
                   <Text style={spotRadius === r ? styles.chipTextActive : styles.chipText}>{r} mi</Text>
@@ -362,10 +729,10 @@ export default function Index() {
             </ScrollView>
           </Card>
 
-          {!location ? (
+          {!customPlace && !location ? (
             <Card>
               <Text style={styles.sectionTitle}>Turn on location</Text>
-              <Text style={styles.muted}>FishBite uses your phone's GPS to find access points around you.</Text>
+              <Text style={styles.muted}>FishBite uses your phone's GPS to find access points around you, or search a location above.</Text>
               <Pressable style={styles.primaryButton} onPress={() => loadSpots()}>
                 <Text style={styles.primaryButtonText}>Use my location</Text>
               </Pressable>
@@ -397,10 +764,90 @@ export default function Index() {
                 {spot.unit ? <Text style={styles.detail}>Area: {spot.unit}</Text> : null}
                 {spot.access_status ? <Text style={styles.detail}>Access: {spot.access_status}</Text> : null}
                 {spot.description ? <Text style={styles.detail}>{spot.description}</Text> : null}
+                <Pressable onPress={() => saveSpotAsWaypoint(spot)}>
+                  <Text style={[styles.link, { marginTop: 10 }]}>+ Save to My Waypoints</Text>
+                </Pressable>
               </Card>
             ))
           )}
+          </>
+          )}
         </ScrollView>
+      </View>
+    );
+  }
+
+  function MapTab() {
+    const origin = spotsOrigin();
+
+    const region = {
+      latitude: origin?.coords.latitude ?? 40.7128,
+      longitude: origin?.coords.longitude ?? -74.006,
+      latitudeDelta: 0.08,
+      longitudeDelta: 0.08,
+    };
+
+    return (
+      <View style={styles.flex}>
+        <View style={styles.mapHeader}>
+          <View>
+            <Text style={styles.proBadge}>PRO</Text>
+            <Text style={styles.title}>Depth Chart</Text>
+          </View>
+          <Pressable style={styles.smallButton} onPress={() => setShowDepthChart((v) => !v)}>
+            <Text style={styles.smallButtonText}>{showDepthChart ? "Hide depths" : "Show depths"}</Text>
+          </Pressable>
+        </View>
+
+        {!origin ? (
+          <View style={styles.mapNotice}>
+            <Text style={styles.muted}>Turn on GPS or search a location on the Spots tab to center the map on you.</Text>
+          </View>
+        ) : null}
+
+        <MapView
+          style={styles.flex}
+          provider={PROVIDER_DEFAULT}
+          initialRegion={region}
+          showsUserLocation
+        >
+          {showDepthChart ? (
+            <UrlTile
+              urlTemplate="https://gis.charttools.noaa.gov/arcgis/rest/services/MarineChart_Services/NOAACharts/MapServer/tile/{z}/{y}/{x}"
+              maximumZ={16}
+              flipY={false}
+              opacity={0.85}
+              zIndex={1}
+            />
+          ) : null}
+
+          {spots.map((spot) => (
+            <Marker
+              key={`spot-${spot.id}`}
+              coordinate={{ latitude: spot.lat, longitude: spot.lon }}
+              title={spot.name}
+              description={`${spot.distance_miles} mi · Tap for directions`}
+              pinColor={COLORS.green}
+              onCalloutPress={() => openDirections(spot.lat, spot.lon)}
+            />
+          ))}
+
+          {waypoints.map((w) => (
+            <Marker
+              key={`wp-${w.id}`}
+              coordinate={{ latitude: w.lat, longitude: w.lon }}
+              title={w.label}
+              description={w.notes || "Tap for directions"}
+              pinColor="orange"
+              onCalloutPress={() => openDirections(w.lat, w.lon)}
+            />
+          ))}
+        </MapView>
+
+        <View style={styles.mapLegend}>
+          <Text style={styles.mapLegendText}>🟢 Public spots   🟠 My waypoints</Text>
+          <Text style={styles.mapLegendCaption}>Depth contours & soundings from NOAA nautical charts - coverage may be sparse away from navigable water.</Text>
+        </View>
       </View>
     );
   }
@@ -525,19 +972,26 @@ export default function Index() {
     );
   }
 
+  // Home/Spots/Fish/Log/History are called directly here (not as <Home />
+  // JSX elements) precisely because they're declared inside Index and need
+  // to read its state via closure. Calling them as plain functions inlines
+  // their returned JSX straight into Index's own render output instead of
+  // registering them as separate React component types, so the underlying
+  // View/TextInput elements keep a stable identity across re-renders.
   return (
     <SafeAreaView style={styles.container}>
-      {tab === "Home" && <Home />}
-      {tab === "Spots" && <Spots />}
-      {tab === "Fish" && <Fish />}
-      {tab === "Log" && <Log />}
-      {tab === "History" && <History />}
+      {tab === "Home" && Home()}
+      {tab === "Spots" && Spots()}
+      {tab === "Map" && MapTab()}
+      {tab === "Fish" && Fish()}
+      {tab === "Log" && Log()}
+      {tab === "History" && History()}
 
       <View style={styles.nav}>
-        {(["Home", "Spots", "Fish", "Log", "History"] as Tab[]).map((item) => (
+        {(["Home", "Spots", "Map", "Fish", "Log", "History"] as Tab[]).map((item) => (
           <Pressable key={item} style={styles.navItem} onPress={() => setTab(item)}>
             <Text style={[styles.navIcon, tab === item && styles.navIconActive]}>
-              {item === "Home" ? "⌂" : item === "Spots" ? "📍" : item === "Fish" ? "🐟" : item === "Log" ? "📝" : "🕘"}
+              {item === "Home" ? "⌂" : item === "Spots" ? "📍" : item === "Map" ? "🗺️" : item === "Fish" ? "🐟" : item === "Log" ? "📝" : "🕘"}
             </Text>
             <Text style={[styles.navText, tab === item && styles.navTextActive]}>{item}</Text>
           </Pressable>
@@ -560,6 +1014,14 @@ const styles = StyleSheet.create({
   label: { fontSize: 13, fontWeight: "700", color: COLORS.muted, marginBottom: 7, marginTop: 5 },
   sectionTitle: { fontSize: 18, fontWeight: "800", color: COLORS.ink },
   muted: { color: COLORS.muted, fontSize: 13, lineHeight: 19 },
+  proBadgeRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  proBadge: { backgroundColor: COLORS.green, color: "#fff", fontSize: 10, fontWeight: "900", letterSpacing: 1, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6, overflow: "hidden" },
+  tipBox: { marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: COLORS.border },
+  segmentRow: { flexDirection: "row", backgroundColor: COLORS.light, borderRadius: 12, padding: 4, marginBottom: 14 },
+  segment: { flex: 1, paddingVertical: 10, borderRadius: 9, alignItems: "center" },
+  segmentActive: { backgroundColor: COLORS.white, borderWidth: 1, borderColor: COLORS.border },
+  segmentText: { color: COLORS.muted, fontWeight: "700", fontSize: 13 },
+  segmentTextActive: { color: COLORS.green, fontWeight: "800", fontSize: 13 },
   selector: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: COLORS.border, borderRadius: 14, padding: 12, marginBottom: 12 },
   selectorIcon: { fontSize: 26, marginRight: 12 },
   selectorTitle: { fontSize: 16, fontWeight: "800", color: COLORS.ink, flex: 1 },
@@ -605,4 +1067,9 @@ const styles = StyleSheet.create({
   navIconActive: { opacity: 1 },
   navText: { fontSize: 10, color: COLORS.muted, marginTop: 2, fontWeight: "700" },
   navTextActive: { color: COLORS.green },
+  mapHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 18, paddingBottom: 12, backgroundColor: "#f8fbfa" },
+  mapNotice: { paddingHorizontal: 18, paddingBottom: 10, backgroundColor: "#f8fbfa" },
+  mapLegend: { position: "absolute", bottom: 90, left: 14, right: 14, backgroundColor: "rgba(255,255,255,0.94)", borderRadius: 12, padding: 10, borderWidth: 1, borderColor: COLORS.border },
+  mapLegendText: { fontSize: 12, fontWeight: "800", color: COLORS.ink },
+  mapLegendCaption: { fontSize: 11, color: COLORS.muted, marginTop: 3, lineHeight: 15 },
 });

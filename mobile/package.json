@@ -17,13 +17,14 @@
     "expo-location": "^18.1.6",
     "expo-router": "^5.1.4",
     "query-string": "^9.5.1",
-    "react": "19.0.0",
+    "react": "19.2.8",
     "react-native": "^0.86.3",
+    "react-native-maps": "^1.29.2",
     "react-native-safe-area-context": "5.4.0",
     "react-native-screens": "4.11.1"
   },
   "devDependencies": {
-    "@types/react": "~19.0.10",
+    "@types/react": "~19.2.18",
     "typescript": "~5.8.3"
   }
 }

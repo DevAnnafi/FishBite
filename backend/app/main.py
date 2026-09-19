@@ -26,9 +26,13 @@ from .services import (
     parse_noaa_tide_predictions,
     nearest_tide_value,
     tide_movement,
+    MAX_TIDE_STATION_DISTANCE_MILES,
 )
 
 from .spots import router as spots_router
+from .geocode import router as geocode_router
+from .recommend import router as recommend_router
+from .waypoints import router as waypoints_router
 
 app = FastAPI(
     title="FishBite API",
@@ -36,6 +40,9 @@ app = FastAPI(
 )
 
 app.include_router(spots_router)
+app.include_router(geocode_router)
+app.include_router(recommend_router)
+app.include_router(waypoints_router)
 
 Base.metadata.create_all(bind=engine)
 
@@ -111,6 +118,7 @@ async def forecast(req: ForecastRequest):
             req.species,
             day,
             tide_data=tide_data,
+            categories=req.categories,
         )
 
         # --------------------------------------------------
@@ -124,8 +132,15 @@ async def forecast(req: ForecastRequest):
                 station.get("id", "Unknown"),
             )
 
+            station_distance = station.get("distance_miles")
+
             explanation.append(
                 f"Nearest NOAA tide station: {station_name}"
+                + (
+                    f" ({station_distance} mi away)"
+                    if station_distance is not None
+                    else ""
+                )
             )
 
             if tide_data:
@@ -166,8 +181,10 @@ async def forecast(req: ForecastRequest):
         else:
 
             quality = (
-                "Weather forecast available; "
-                "no nearby NOAA tide station found"
+                "Weather forecast available; no NOAA tide station "
+                f"within {MAX_TIDE_STATION_DISTANCE_MILES:.0f} mi "
+                "(likely inland/freshwater water with no real tide - "
+                "tide is not included in the score)"
             )
 
         # --------------------------------------------------

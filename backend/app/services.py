@@ -2,6 +2,8 @@ from datetime import datetime, timedelta
 import math
 import httpx
 
+from .geo import haversine_miles
+
 
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 
@@ -41,7 +43,23 @@ async def weather(lat: float, lon: float):
         return r.json()
 
 
-async def nearest_tide_station(lat: float, lon: float):
+# Beyond this distance, attaching the "nearest" NOAA tide-prediction
+# station's numbers stops being meaningful - it usually means the
+# requested spot is on an inland freshwater lake/river with no real tidal
+# cycle at all, not that the ocean is merely far away. Showing a distant
+# coastal station's tide as if it applied there would be actively wrong,
+# not just imprecise, so we treat it the same as no station being found.
+MAX_TIDE_STATION_DISTANCE_MILES = 75.0
+
+
+async def fetch_tide_stations() -> list[dict]:
+    """
+    Fetch the full list of NOAA tide-prediction stations once. Callers
+    that need to rank several nearby points (e.g. picking a recommended
+    fishing spot) should fetch this a single time and reuse it with
+    pick_nearest_station() rather than re-fetching per point.
+    """
+
     async with httpx.AsyncClient(timeout=12) as client:
         r = await client.get(
             NOAA_STATIONS,
@@ -49,12 +67,18 @@ async def nearest_tide_station(lat: float, lon: float):
         )
 
         if r.status_code != 200:
-            return None
+            return []
 
-        stations = r.json().get("stations", [])
+        return r.json().get("stations", [])
 
+
+def pick_nearest_station(
+    stations: list[dict],
+    lat: float,
+    lon: float,
+) -> dict | None:
     best = None
-    best_d = float("inf")
+    best_distance = float("inf")
 
     for station in stations:
         if "lat" not in station or "lng" not in station:
@@ -66,18 +90,33 @@ async def nearest_tide_station(lat: float, lon: float):
         except (TypeError, ValueError):
             continue
 
-        # Simple squared geographic distance.
-        # Good enough for selecting the nearest station at this stage.
-        d = (
-            (station_lat - lat) ** 2
-            + (station_lon - lon) ** 2
+        # True great-circle distance rather than raw squared degree
+        # difference - degrees of longitude shrink toward the poles, so
+        # the naive version can pick the wrong "nearest" station near
+        # coastlines that run more east-west than north-south.
+        distance = haversine_miles(
+            lat,
+            lon,
+            station_lat,
+            station_lon,
         )
 
-        if d < best_d:
-            best_d = d
+        if distance < best_distance:
+            best_distance = distance
             best = station
 
-    return best
+    if best is None or best_distance > MAX_TIDE_STATION_DISTANCE_MILES:
+        return None
+
+    return {
+        **best,
+        "distance_miles": round(best_distance, 1),
+    }
+
+
+async def nearest_tide_station(lat: float, lon: float):
+    stations = await fetch_tide_stations()
+    return pick_nearest_station(stations, lat, lon)
 
 
 async def tide_predictions(station_id: str, day: str):
@@ -278,9 +317,43 @@ def tide_score(
     )
 
 
-def astronomical_score(hour: int) -> float:
-    # Baseline: dawn/dusk windows are weighted more heavily.
+def astronomical_score(hour: int, activity_profile: str = "dawn_dusk") -> float:
+    """
+    Time-of-day contribution, shaped by how the target species actually
+    feeds rather than one universal dawn/dusk curve for every fish.
 
+    Profiles:
+      dawn_dusk      - classic low-light feeders (most gamefish/panfish).
+      nocturnal      - feeds mainly after dark (catfish, walleye, eels).
+      structure_tide - light-insensitive bottom/reef feeders; flatter
+                       curve so tide movement (see tide_score) drives
+                       more of the swing for these species.
+      daytime        - feeds through daylight hours (pelagics that hunt
+                       visually, carp, tautog).
+    """
+
+    if activity_profile == "nocturnal":
+        if hour >= 22 or hour <= 3:
+            return 18
+        if hour in (4, 5, 20, 21):
+            return 10
+        return 3
+
+    if activity_profile == "structure_tide":
+        if 5 <= hour <= 7 or 18 <= hour <= 20:
+            return 12
+        if 4 <= hour <= 8 or 17 <= hour <= 21:
+            return 10
+        return 8
+
+    if activity_profile == "daytime":
+        if 9 <= hour <= 16:
+            return 16
+        if 7 <= hour <= 8 or 17 <= hour <= 18:
+            return 10
+        return 4
+
+    # dawn_dusk (default)
     if 5 <= hour <= 7 or 18 <= hour <= 20:
         return 18
 
@@ -323,32 +396,122 @@ def weather_score(
     return score
 
 
-def species_factor(
+# Curated overrides for species whose feeding behavior is well documented
+# and differs meaningfully from a generic "gamefish" pattern. Matched by
+# substring against the lowercased species name, most-specific key first
+# (checked in dict order below) so e.g. "black sea bass" hits the sea-bass
+# entry rather than a generic "bass" one.
+#
+# Each entry: (ideal_temp_f, temp_sensitivity, activity_profile)
+#   ideal_temp_f      - water/air temp proxy where the species feeds best
+#   temp_sensitivity  - points lost per degree away from ideal_temp_f
+#   activity_profile  - which astronomical_score() curve applies
+SPECIES_NAME_OVERRIDES: list[tuple[str, tuple[float, float, str]]] = [
+    ("striped bass", (62, 0.35, "dawn_dusk")),
+    ("bluefish", (67, 0.40, "dawn_dusk")),
+    ("weakfish", (65, 0.35, "dawn_dusk")),
+    ("black sea bass", (62, 0.35, "structure_tide")),
+    ("sea bass", (62, 0.35, "structure_tide")),
+    ("tautog", (58, 0.40, "daytime")),
+    ("scup", (62, 0.35, "structure_tide")),
+    ("porgy", (62, 0.35, "structure_tide")),
+    ("fluke", (68, 0.45, "structure_tide")),
+    ("flounder", (66, 0.40, "structure_tide")),
+    ("halibut", (52, 0.30, "structure_tide")),
+    ("sole", (58, 0.30, "structure_tide")),
+    ("grouper", (72, 0.30, "structure_tide")),
+    ("mackerel", (63, 0.35, "dawn_dusk")),
+    ("mahi-mahi", (75, 0.30, "daytime")),
+    ("wahoo", (75, 0.30, "daytime")),
+    ("tuna", (68, 0.30, "daytime")),
+    ("bonito", (66, 0.35, "daytime")),
+    ("little tunny", (66, 0.35, "daytime")),
+    ("marlin", (78, 0.25, "daytime")),
+    ("sailfish", (78, 0.25, "daytime")),
+    ("swordfish", (65, 0.25, "nocturnal")),
+    ("walleye", (60, 0.40, "nocturnal")),
+    ("catfish", (75, 0.30, "nocturnal")),
+    ("bullhead", (72, 0.30, "nocturnal")),
+    ("eel", (68, 0.30, "nocturnal")),
+    ("burbot", (45, 0.35, "nocturnal")),
+    ("trout", (58, 0.50, "dawn_dusk")),
+    ("char", (52, 0.50, "dawn_dusk")),
+    ("northern pike", (58, 0.40, "dawn_dusk")),
+    ("muskellunge", (58, 0.40, "dawn_dusk")),
+    ("pickerel", (62, 0.40, "dawn_dusk")),
+    ("crappie", (62, 0.40, "dawn_dusk")),
+    ("bass", (64, 0.40, "dawn_dusk")),
+    ("carp", (70, 0.30, "daytime")),
+    ("tarpon", (75, 0.30, "dawn_dusk")),
+    ("bonefish", (78, 0.30, "daytime")),
+    ("permit", (78, 0.30, "daytime")),
+    ("jack crevalle", (78, 0.30, "daytime")),
+]
+
+# Fallback when no name override matches: derived from the species'
+# category tags (already present in the mobile catalog), so every species
+# gets a behaviorally reasonable curve instead of one flat number.
+CATEGORY_PROFILES: dict[str, tuple[float, float, str]] = {
+    "Sharks & Rays": (68, 0.30, "nocturnal"),
+    "Deep Sea": (55, 0.30, "structure_tide"),
+    "Reef Fish": (76, 0.35, "structure_tide"),
+    "Bottom Fish": (62, 0.30, "structure_tide"),
+    "Panfish": (66, 0.40, "dawn_dusk"),
+    "Migratory Fish": (63, 0.35, "dawn_dusk"),
+    "Game Fish": (64, 0.40, "dawn_dusk"),
+    "Brackish / Estuary": (66, 0.35, "dawn_dusk"),
+    "Saltwater / Marine": (65, 0.35, "dawn_dusk"),
+    "Freshwater": (66, 0.35, "dawn_dusk"),
+}
+
+# Priority order for picking one profile when a species carries several
+# category tags - most behaviorally distinctive category wins.
+CATEGORY_PRIORITY = [
+    "Sharks & Rays",
+    "Deep Sea",
+    "Reef Fish",
+    "Bottom Fish",
+    "Panfish",
+    "Migratory Fish",
+    "Game Fish",
+    "Brackish / Estuary",
+    "Saltwater / Marine",
+    "Freshwater",
+]
+
+
+def resolve_species_profile(
     species: str,
-    temp_f: float,
-) -> float:
+    categories: list[str] | None = None,
+) -> tuple[float, float, str]:
+    """
+    Return (ideal_temp_f, temp_sensitivity, activity_profile) for a
+    species: a curated name-based override when we have one, otherwise a
+    profile derived from its category tags, otherwise a neutral default.
+    """
 
     s = species.lower()
 
-    if "bass" in s:
-        return max(
-            0,
-            18 - abs(temp_f - 64) * 0.4
-        )
+    for key, profile in SPECIES_NAME_OVERRIDES:
+        if key in s:
+            return profile
 
-    if "fluke" in s:
-        return max(
-            0,
-            18 - abs(temp_f - 68) * 0.45
-        )
+    for category in CATEGORY_PRIORITY:
+        if categories and category in categories:
+            return CATEGORY_PROFILES[category]
 
-    if "bluefish" in s:
-        return max(
-            0,
-            18 - abs(temp_f - 67) * 0.4
-        )
+    return (65, 0.30, "dawn_dusk")
 
-    return 12
+
+def species_factor(
+    temp_f: float,
+    ideal_temp_f: float,
+    temp_sensitivity: float,
+) -> float:
+    return max(
+        0,
+        18 - abs(temp_f - ideal_temp_f) * temp_sensitivity
+    )
 
 
 def build_forecast(
@@ -356,6 +519,7 @@ def build_forecast(
     species: str,
     day: str,
     tide_data=None,
+    categories: list[str] | None = None,
 ):
 
     times = w["hourly"]["time"]
@@ -363,6 +527,12 @@ def build_forecast(
     pressures = w["hourly"]["pressure_msl"]
     winds = w["hourly"]["wind_speed_10m"]
     rain = w["hourly"]["precipitation"]
+
+    # Resolved once per request - the species' behavior doesn't change
+    # hour to hour, only which hours score well because of it.
+    ideal_temp_f, temp_sensitivity, activity_profile = (
+        resolve_species_profile(species, categories)
+    )
 
     # Parse NOAA data once rather than repeatedly.
     tide_predictions_parsed = []
@@ -385,7 +555,7 @@ def build_forecast(
         # Weather / astronomical / species components
         # --------------------------------------------------
 
-        astro = astronomical_score(dt.hour)
+        astro = astronomical_score(dt.hour, activity_profile)
 
         weather = weather_score(
             temps[i],
@@ -395,8 +565,9 @@ def build_forecast(
         )
 
         species_component = species_factor(
-            species,
             temps[i],
+            ideal_temp_f,
+            temp_sensitivity,
         )
 
         # --------------------------------------------------
@@ -473,9 +644,15 @@ def build_forecast(
                 f"({abs(tide_rate):.2f} ft/hr)"
             )
 
+        # Human-readable hour label (e.g. "5pm", "12am") for display.
+        # Kept separate from "time", which stays a parseable ISO string
+        # because `best["time"]` below is re-parsed with fromisoformat().
+        time_label = dt.strftime("%I%p").lstrip("0").lower()
+
         rows.append(
             {
                 "time": ts,
+                "time_label": time_label,
                 "score": score,
                 "tide": tide_description,
                 "temperature_f": temps[i],
@@ -520,11 +697,18 @@ def build_forecast(
     # Explanation
     # ------------------------------------------------------
 
+    profile_labels = {
+        "dawn_dusk": "Dawn/dusk activity window weighted higher",
+        "nocturnal": "Night/low-light hours weighted higher (this species feeds mainly after dark)",
+        "structure_tide": "Time of day weighted lightly; tide movement carries more weight for this species",
+        "daytime": "Daylight hours weighted higher for this species",
+    }
+
     explanation = [
-        "Dawn/dusk activity window weighted higher",
+        profile_labels.get(activity_profile, profile_labels["dawn_dusk"]),
         (
-            f"Water/air temperature fit is estimated "
-            f"around the {species} baseline"
+            f"Water/air temperature fit is estimated around a "
+            f"{ideal_temp_f:.0f}°F baseline for {species}"
         ),
         "Weather and pressure are included in the baseline score",
     ]

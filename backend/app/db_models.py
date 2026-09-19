@@ -114,6 +114,41 @@ class FishingSessionDB(Base):
     nullable=False,
     )
 
+class WaypointDB(Base):
+    __tablename__ = "waypoints"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        index=True,
+    )
+
+    label: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+    )
+
+    lat: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+
+    lon: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+
+    notes: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+    )
+
+
 class FishingObservationDB(Base):
     __tablename__ = "fishing_observations"
 

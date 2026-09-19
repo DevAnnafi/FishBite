@@ -22,6 +22,7 @@ class FishingSession(BaseModel):
 
 class ForecastHour(BaseModel):
     time: str
+    time_label: str
     score: int
     tide: str
     temperature_f: float
@@ -34,6 +35,7 @@ class ForecastRequest(BaseModel):
     lon: float
     species: str
     date: Optional[str] = None
+    categories: list[str] = []
 
 
 class ForecastResponse(BaseModel):
@@ -51,3 +53,10 @@ class FishingObservation(BaseModel):
     observation_time: datetime
     bites: int = Field(default=0, ge=0)
     fish_caught: int = Field(default=0, ge=0)
+
+
+class Waypoint(BaseModel):
+    label: str
+    lat: float
+    lon: float
+    notes: Optional[str] = None

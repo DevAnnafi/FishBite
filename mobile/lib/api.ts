@@ -22,7 +22,8 @@ export async function getForecast(
   lat: number,
   lon: number,
   species: string,
-  date?: string
+  date?: string,
+  categories?: string[]
 ) {
   return request("/forecast", {
     method: "POST",
@@ -34,6 +35,7 @@ export async function getForecast(
       lon,
       species,
       date,
+      categories: categories || [],
     }),
   });
 }
@@ -70,4 +72,54 @@ export async function getNearbySpots(
       lon
     )}&radius_miles=${encodeURIComponent(radiusMiles)}`
   );
+}
+
+export async function searchLocations(query: string) {
+  return request(`/geocode/search?query=${encodeURIComponent(query)}`);
+}
+
+export async function getRecommendedSpot(
+  lat: number,
+  lon: number,
+  species: string,
+  categories: string[] = [],
+  radiusMiles = 15
+) {
+  const categoryParams = categories
+    .map((c) => `categories=${encodeURIComponent(c)}`)
+    .join("&");
+
+  return request(
+    `/spots/recommended?lat=${encodeURIComponent(
+      lat
+    )}&lon=${encodeURIComponent(lon)}&species=${encodeURIComponent(
+      species
+    )}&radius_miles=${encodeURIComponent(radiusMiles)}` +
+      (categoryParams ? `&${categoryParams}` : "")
+  );
+}
+
+export async function getWaypoints() {
+  return request("/waypoints");
+}
+
+export async function createWaypoint(payload: {
+  label: string;
+  lat: number;
+  lon: number;
+  notes?: string | null;
+}) {
+  return request("/waypoints", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteWaypoint(id: number) {
+  return request(`/waypoints/${id}`, {
+    method: "DELETE",
+  });
 }
