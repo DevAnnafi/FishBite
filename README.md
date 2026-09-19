@@ -28,7 +28,7 @@ npm install
 npx expo start
 ```
 
-Set `EXPO_PUBLIC_API_URL` to your computer's LAN IP, e.g. `http://192.168.1.20:8000` when testing on a phone.
+Set `EXPO_PUBLIC_API_URL` to your computer's LAN IP, e.g. `http://xx.xx.x.xx:8000` when testing on a phone.
 
 The app works with a fallback forecast if the backend is unavailable, so the UI can be developed immediately.
 
